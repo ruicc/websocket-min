@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="http://code.jquery.com/jquery-latest.min.js"></script>
+<script>
+jQuery(function() {
+    var ws = new WebSocket('ws://localhost:3000/');
+    var tid = null;
+
+    // WebSocket open時のイベントハンドラ登録
+    ws.onopen = function () {
+        console.log('on open');
+        tid = setInterval(function () {
+                console.log('try-send');
+                ws.send('Hey hey!');
+        }, 800); 
+    };
+
+    // WebSocket message受信時のイベントハンドラ登録
+    ws.onmessage = function (message) {
+        console.log(message.data);
+    };
+
+    // WebSocket error時のイベントハンドラ登録
+    ws.onerror = function (e) {
+        console.log('on err:' + e);
+        if (tid !== null) {
+            clearInterval(tid);
+        }
+    };
+
+    // WebSocket close時のイベントハンドラ登録
+    ws.onclose = function () {
+        console.log('on close');
+        if (tid !== null) {
+            clearInterval(tid);
+        }
+    };
+
+    console.log('--- end setting ---');
+});
+</script>
+</head>
+<body>
+    <h1>Learn You A WebSocket!</h1>
+    <div>See JavaScript console.</div>
+</body>
+</html>
