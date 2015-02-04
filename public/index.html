@@ -17,8 +17,8 @@ jQuery(function() {
     };
 
     // WebSocket message受信時のイベントハンドラ登録
-    ws.onmessage = function (message) {
-        console.log(message.data);
+    ws.onmessage = function (e) {
+        console.log(e.data);
     };
 
     // WebSocket error時のイベントハンドラ登録
@@ -30,8 +30,8 @@ jQuery(function() {
     };
 
     // WebSocket close時のイベントハンドラ登録
-    ws.onclose = function () {
-        console.log('on close');
+    ws.onclose = function (e) {
+        console.log('on close: ' + e.reason);
         if (tid !== null) {
             clearInterval(tid);
         }
