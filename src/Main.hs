@@ -18,7 +18,7 @@ import qualified Data.Text as T
 --import qualified Data.Text.Encoding as T
 import qualified Data.Aeson as JSON
 import qualified Data.Aeson.TH as JSON
-import           Data.Unique (newUnique, hashUnique)
+import qualified Data.Unique as Unique
 import Data.Monoid ((<>))
 import Control.Applicative
 import Control.Concurrent
@@ -95,16 +95,6 @@ helloApp req sendResponse = do
             "public/index.html"
             Nothing
 
-echo :: WS.Connection -> IO ()
-echo conn = go
-  where
-    go = do
-        input :: LBS.ByteString
-            <- WS.receiveData conn
-        LBC.putStrLn $ input
-        WS.sendTextData conn input
-        go
-
 ------------------------------------------------------------------------------------------
 
 makeMatcherThread :: IO (ThreadId, MatcherChan)
@@ -125,14 +115,14 @@ match matchCh = do
         getMatchRequest :: MatcherChan -> IO MatchRequest
         getMatchRequest mCh = do
             (tid, mv) <- readChan mCh
-            cid <- ClientId . hashUnique <$> newUnique
+            cid <- ClientId . Unique.hashUnique <$> Unique.newUnique
             ch <- newChan
             -- mv is still empty.
             return $ (ClientState cid tid ch, mv)
 
         makeGroupState :: [MatchRequest] -> IO GroupState
         makeGroupState rqs = do
-            gid <- GroupId . hashUnique <$> newUnique
+            gid <- GroupId . Unique.hashUnique <$> Unique.newUnique
             return $ GroupState gid (map fst rqs)
 
         -- Just do putMVar.
@@ -148,7 +138,7 @@ match matchCh = do
 
     sendBackToClient gs rqs
 
---------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------
 
 clientThread :: WS.Connection -> MatcherChan -> IO ()
 clientThread conn matchCh = do
@@ -212,24 +202,28 @@ clientLoop conn cs gs = do
 
                     fromClientToChan
 
-        -- Get data from channel, and send it to client with no process.
+        -- Get data from channel, and send it to the client with no processing.
         fromChanToClient :: Chan Message -> IO ()
         fromChanToClient ch = do
-            msg <- readChan ch
+            msg :: Message
+                <- readChan ch
             WS.sendTextData conn $ JSON.encode msg
             fromChanToClient ch
+
+        -- Handle message
+        clientProcess :: ClientState -> GroupState -> Message -> IO ([ClientId], Message)
+        clientProcess cs gs msg = do
+            let
+                idsWithoutMyself = filter (/= getClientId cs) (getAllClientIds gs)
+
+            return (idsWithoutMyself, msg)
 
     _tid <- forkIO $ fromChanToClient (getChan cs)
 
     fromClientToChan
         
 
-clientProcess :: ClientState -> GroupState -> Message -> IO ([ClientId], Message)
-clientProcess cs gs msg = do
-    let
-        idsWithoutMyself = filter (/= getClientId cs) (getAllClientIds gs)
-    return (idsWithoutMyself, msg)
-
+------------------------------------------------------------------------------------------
 
 main :: IO ()
 main = do
