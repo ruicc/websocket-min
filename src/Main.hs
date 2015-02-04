@@ -9,20 +9,22 @@ import qualified Network.Wai.Handler.WebSockets as WaiWS
 import qualified Network.WebSockets as WS
 import qualified Network.HTTP.Types.Status as Status
 import qualified Network.HTTP.Types.Header as Header
-import qualified Data.ByteString as BS
+--import qualified Data.ByteString as BS
 --import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBC
 import qualified Data.Text as T
-import qualified Data.Text.IO as T
-import qualified Data.Text.Encoding as T
+--import qualified Data.Text.IO as T
+--import qualified Data.Text.Encoding as T
 import qualified Data.Aeson as JSON
 import qualified Data.Aeson.TH as JSON
 import           Data.Unique (newUnique, hashUnique)
-import Data.Monoid ( (<>) )
+import Data.Monoid ((<>))
+import Data.Maybe (isNothing)
 import Control.Applicative
 import Control.Concurrent
 import Control.Monad
+import Control.Exception
 
 
 newtype ClientId = ClientId Int
@@ -34,10 +36,41 @@ data ClientState = ClientState ClientId ThreadId (Chan Message)
 data GroupState = GroupState GroupId [ClientState]
     deriving (Eq)
 data Message
-    = InitGame { clientId :: ClientId, otherClientIds :: [ClientId] }
-    | ToAll { message_to_all :: T.Text }
-    | EndGame
+    = InitGame
+        { message :: T.Text
+        , clientId :: ClientId
+        , allClientIds :: [ClientId]
+        }
+    | ToPlayers
+        { message :: T.Text
+        , toIds :: [ClientId]
+        }
+    | ToAll
+        { message :: T.Text
+        }
+    | EndGame { message :: T.Text }
     deriving (Show, Eq)
+
+getChan :: ClientState -> Chan Message
+getChan (ClientState _ _ ch) = ch
+
+getClientState :: ClientId -> [ClientState] -> ClientState
+getClientState _ [] = error "Target ClientState not found"
+getClientState cid (target@(ClientState cid' _ _) : css)
+    | cid == cid' = target
+    | otherwise   = getClientState cid css
+
+getClientStates :: GroupState -> [ClientState]
+getClientStates (GroupState _ css) = css
+
+getClientId :: ClientState -> ClientId
+getClientId (ClientState cid _ _) = cid
+
+getTargetChan :: GroupState -> ClientId -> Chan Message
+getTargetChan gs cid = getChan $ getClientState cid $ getClientStates gs
+
+getAllClientIds :: GroupState -> [ClientId]
+getAllClientIds (GroupState _ css) = map (\ (ClientState cid' _ _) -> cid') css
 
 JSON.deriveJSON JSON.defaultOptions ''ClientId
 JSON.deriveJSON JSON.defaultOptions ''GroupId
@@ -47,12 +80,6 @@ type MatcherChan = Chan (ThreadId, MVar (ClientState, GroupState))
 type MatchRequest = (ClientState, MVar (ClientState, GroupState))
 
 ------------------------------------------------------------------------------------------
-
-appWebSocketEcho :: WS.ServerApp
-appWebSocketEcho req = do
-    conn <- WS.acceptRequest req
-    void $ WS.forkPingThread conn 10
-    void $ echo conn
 
 appSocket :: MatcherChan -> WS.ServerApp
 appSocket matchCh req = do
@@ -80,7 +107,6 @@ echo conn = go
         go
 
 ------------------------------------------------------------------------------------------
-
 
 makeMatcherThread :: IO (ThreadId, MatcherChan)
 makeMatcherThread = do
@@ -127,28 +153,86 @@ match matchCh = do
 
 clientThread :: WS.Connection -> MatcherChan -> IO ()
 clientThread conn matchCh = do
-    -- Init
+
+    let
+        close connection = WS.sendClose connection
+                $ JSON.encode $ EndGame { message = "Game ended" }
+
+        sendInit connection cs gs = WS.sendTextData connection
+                $ JSON.encode $ InitGame
+                    { message = "Init Game"
+                    , clientId = getClientId cs
+                    , allClientIds = getAllClientIds gs
+                    }
+
     tid <- myThreadId
     mv <- newEmptyMVar
+
+    -- Send match request.
     writeChan matchCh (tid, mv)
 
-    -- Wait till value returns.
+    -- Wait till match result returns.
     -- TODO: timeout, retry?
     (cs, gs) :: (ClientState, GroupState)
         <- takeMVar mv
 
-    let
-        ClientState (ClientId cid) _ _ = cs
-
-    -- Send clientId
-    WS.sendTextData conn $ "{\"msg\":\"Init Game: assign clientId\", \"clientId\":" <> (LBC.pack $ show cid) <> "}"
+    -- Init
+    sendInit conn cs gs
 
     -- Loop
+    clientLoop conn cs gs
+            `catch` \ (_ :: SomeException) -> close conn
 
     -- End
+    close conn
 
-    WS.sendClose conn $ ("{\"msg\":\"Game ended\"}" :: LBS.ByteString)
 
+clientLoop :: WS.Connection -> ClientState -> GroupState -> IO ()
+clientLoop conn cs gs = do
+    let
+        sendMessage :: Chan Message -> Message -> IO ()
+        sendMessage ch msg = writeChan ch msg
+
+        -- Get data from client connection, handle the data, and send it to other channels.
+        fromClientToChan :: IO ()
+        fromClientToChan = do
+
+            input :: LBS.ByteString
+                <- WS.receiveData conn
+
+            let
+                mmsg = JSON.decode input
+                Just msg = mmsg
+
+            when (isNothing mmsg) $ do
+                LBC.putStrLn $ "Client sent some data to server, but dencode failed:" <> input
+                fromClientToChan
+
+            (cids, msg') :: ([ClientId], Message)
+                <- clientProcess cs gs msg
+
+            forM_ cids $ \cid -> do
+                sendMessage (getTargetChan gs cid) msg'
+
+            fromClientToChan
+
+        -- Get data from channel, and send it to client with no process.
+        fromChanToClient :: Chan Message -> IO ()
+        fromChanToClient ch = do
+            msg <- readChan ch
+            WS.sendTextData conn $ JSON.encode msg
+            fromChanToClient ch
+
+    _tid <- forkIO $ fromChanToClient (getChan cs)
+
+    fromClientToChan
+        
+
+clientProcess :: ClientState -> GroupState -> Message -> IO ([ClientId], Message)
+clientProcess cs gs msg = do
+    let
+        idsWithoutMyself = filter (/= getClientId cs) (getAllClientIds gs)
+    return (idsWithoutMyself, msg)
 
 
 main :: IO ()
@@ -162,16 +246,3 @@ main = do
 
     Warp.runSettings setting
             $ WaiWS.websocketsOr WS.defaultConnectionOptions (appSocket matchCh) helloApp
-
-
-
--- DONE: Initialize (handshake)
---  とりあえずWebSocketで。
--- TODO: Grouping
---  マッチング系サービスの土台。どうする？
---   * 方針、とりあえず自動でマッチングさせる
---   * Matchingリクエストを投げる、キューに詰める、頭から適当にマッチングさせる、連番付けてMVarで返す
---      スケールしないけどまあ。
---      1threadがChan作って待ち受け、他のthreadがデータ返却用MVarと共にPOSTする
--- TODO: Send message
--- TODO: Create message

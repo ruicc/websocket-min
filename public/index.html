@@ -6,24 +6,37 @@
 jQuery(function() {
     var ws = new WebSocket('ws://localhost:3000/');
     var tid = null;
+    var state = {};
+
+    console.log('--- Start setting ---');
 
     // WebSocket open時のイベントハンドラ登録
     ws.onopen = function () {
-        console.log('on open');
-        tid = setInterval(function () {
-                console.log('try-send');
-                ws.send('Hey hey!');
-        }, 800); 
+        console.log('On open: waiting init response...');
     };
 
     // WebSocket message受信時のイベントハンドラ登録
     ws.onmessage = function (e) {
-        console.log(e.data);
+        var d = eval('(' + e.data + ')');
+        if (d.tag === 'InitGame') {
+            // Initialize
+            console.log('On init: set state');
+            state.clientId = d.clientId;
+            state.allClientIds = d.allClientIds;
+            // Start to send message to servers.
+            tid = setInterval(function () {
+                console.log('try-send');
+                if (state.clientId !== undefined) {
+                    ws.send('{"tag":"ToAll", "message":"Hey hey!! This is <' + state.clientId + '>!!"}');
+                }
+            }, 1200); 
+        }
+        console.log(d);
     };
 
     // WebSocket error時のイベントハンドラ登録
     ws.onerror = function (e) {
-        console.log('on err:' + e);
+        console.log('On err:' + e);
         if (tid !== null) {
             clearInterval(tid);
         }
@@ -31,13 +44,13 @@ jQuery(function() {
 
     // WebSocket close時のイベントハンドラ登録
     ws.onclose = function (e) {
-        console.log('on close: ' + e.reason);
+        console.log('On close: ' + e.reason);
         if (tid !== null) {
             clearInterval(tid);
         }
     };
 
-    console.log('--- end setting ---');
+    console.log('--- End setting ---');
 });
 </script>
 </head>
