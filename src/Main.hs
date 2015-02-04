@@ -20,7 +20,6 @@ import qualified Data.Aeson as JSON
 import qualified Data.Aeson.TH as JSON
 import           Data.Unique (newUnique, hashUnique)
 import Data.Monoid ((<>))
-import Data.Maybe (isNothing)
 import Control.Applicative
 import Control.Concurrent
 import Control.Monad
@@ -153,7 +152,6 @@ match matchCh = do
 
 clientThread :: WS.Connection -> MatcherChan -> IO ()
 clientThread conn matchCh = do
-
     let
         close connection = WS.sendClose connection
                 $ JSON.encode $ EndGame { message = "Game ended" }
@@ -190,31 +188,29 @@ clientThread conn matchCh = do
 clientLoop :: WS.Connection -> ClientState -> GroupState -> IO ()
 clientLoop conn cs gs = do
     let
+        -- Send a message to target Client's Thread
         sendMessage :: Chan Message -> Message -> IO ()
         sendMessage ch msg = writeChan ch msg
 
         -- Get data from client connection, handle the data, and send it to other channels.
         fromClientToChan :: IO ()
         fromClientToChan = do
-
             input :: LBS.ByteString
                 <- WS.receiveData conn
 
-            let
-                mmsg = JSON.decode input
-                Just msg = mmsg
+            case JSON.decode input :: Maybe Message of
+                Nothing -> do
+                    LBC.putStrLn $ "Decode failed, ignore:" <> input
+                    fromClientToChan
 
-            when (isNothing mmsg) $ do
-                LBC.putStrLn $ "Client sent some data to server, but dencode failed:" <> input
-                fromClientToChan
+                Just msg -> do
+                    (cids, msg') :: ([ClientId], Message)
+                        <- clientProcess cs gs msg
 
-            (cids, msg') :: ([ClientId], Message)
-                <- clientProcess cs gs msg
+                    forM_ cids $ \cid -> do
+                        sendMessage (getTargetChan gs cid) msg'
 
-            forM_ cids $ \cid -> do
-                sendMessage (getTargetChan gs cid) msg'
-
-            fromClientToChan
+                    fromClientToChan
 
         -- Get data from channel, and send it to client with no process.
         fromChanToClient :: Chan Message -> IO ()
@@ -242,7 +238,11 @@ main = do
         setting = Warp.setPort port Warp.defaultSettings
 
     putStrLn $ "running port " <> show port <> "..."
-    (_tid, matchCh) <- makeMatcherThread
+
+    (_tid, matchCh) :: (ThreadId, MatcherChan)
+        <- makeMatcherThread
 
     Warp.runSettings setting
-            $ WaiWS.websocketsOr WS.defaultConnectionOptions (appSocket matchCh) helloApp
+            $ WaiWS.websocketsOr WS.defaultConnectionOptions
+                    (appSocket matchCh)
+                    helloApp
